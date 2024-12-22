@@ -149,12 +149,12 @@ class PPOAgent:
             next_obs, reward, done, truncated, info = env.step(action.cpu().numpy()[0])
 
             # Store experience (keep everything on CPU during collection)
-            self.obs_buffer.append(obs)
-            self.action_buffer.append(action[0].cpu())
-            self.reward_buffer.append(reward)
-            self.value_buffer.append(value[0].cpu())
-            self.log_prob_buffer.append(log_prob[0].cpu())
-            self.done_buffer.append(done)
+            self.obs_buffer.append(torch.tensor(obs, dtype=torch.float32))
+            self.action_buffer.append(action.cpu().squeeze(0))  # Squeeze to remove batch dim
+            self.reward_buffer.append(torch.tensor(reward, dtype=torch.float32))
+            self.value_buffer.append(value.cpu().squeeze(0))  # Squeeze to remove batch dim
+            self.log_prob_buffer.append(log_prob.cpu().squeeze(0))  # Squeeze to remove batch dim
+            self.done_buffer.append(torch.tensor(done, dtype=torch.float32)).
 
             # Track rewards
             current_rewards.append(reward)
@@ -180,12 +180,12 @@ class PPOAgent:
         print(f"log_prob_buffer length: {len(self.log_prob_buffer)}")
 
         # Convert buffers to tensors and move to device
-        self.obs_buffer = torch.FloatTensor(obs_array).to(self.device)
+        self.obs_buffer = torch.stack(self.obs_buffer).to(self.device)
         self.action_buffer = torch.stack(self.action_buffer).to(self.device)
-        self.reward_buffer = torch.FloatTensor(reward_array).to(self.device)
+        self.reward_buffer = torch.stack(self.reward_buffer).to(self.device)
         self.value_buffer = torch.stack(self.value_buffer).to(self.device)
         self.log_prob_buffer = torch.stack(self.log_prob_buffer).to(self.device)
-        self.done_buffer = torch.FloatTensor(done_array).to(self.device)
+        self.done_buffer = torch.stack(self.done_buffer).to(self.device)
 
         print("\nFinal buffer tensor shapes:")
         print(f"obs_buffer: {self.obs_buffer.shape}")
