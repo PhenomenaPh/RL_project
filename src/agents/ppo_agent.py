@@ -109,14 +109,7 @@ class PPOAgent:
         self.done_buffer = []
 
     def collect_rollouts(self, env: gym.Env) -> Dict[str, float]:
-        """Collect experience using current policy.
-
-        Args:
-            env: Gym environment to collect experience from
-
-        Returns:
-            Dictionary of metrics from collection
-        """
+        """Collect experience using current policy."""
         self.reset_buffers()
         obs, _ = env.reset()
 
@@ -137,29 +130,29 @@ class PPOAgent:
 
             # Store experience
             self.obs_buffer.append(obs)
-            self.action_buffer.append(action)
+            self.action_buffer.append(action[0])  # Remove batch dimension
             self.reward_buffer.append(reward)
-            self.value_buffer.append(value)
-            self.log_prob_buffer.append(log_prob)
+            self.value_buffer.append(value[0])  # Remove batch dimension
+            self.log_prob_buffer.append(log_prob[0])  # Remove batch dimension
             self.done_buffer.append(done)
 
             # Track rewards
             current_rewards.append(reward)
 
             if done or truncated:
-                episode_rewards.append(sum(current_rewards))
+                episode_rewards.append(float(np.sum(current_rewards)))  # Use numpy sum
                 current_rewards = []
                 obs, _ = env.reset()
             else:
                 obs = next_obs
 
-        # Convert buffers to tensors
-        self.obs_buffer = torch.FloatTensor(self.obs_buffer).to(self.device)
+        # Convert buffers to tensors more efficiently
+        self.obs_buffer = torch.FloatTensor(np.array(self.obs_buffer)).to(self.device)
         self.action_buffer = torch.stack(self.action_buffer)
-        self.reward_buffer = torch.FloatTensor(self.reward_buffer).to(self.device)
+        self.reward_buffer = torch.FloatTensor(np.array(self.reward_buffer)).to(self.device)
         self.value_buffer = torch.cat(self.value_buffer)
         self.log_prob_buffer = torch.stack(self.log_prob_buffer)
-        self.done_buffer = torch.FloatTensor(self.done_buffer).to(self.device)
+        self.done_buffer = torch.FloatTensor(np.array(self.done_buffer)).to(self.device)
 
         # Compute advantages and returns
         advantages = self._compute_advantages()
@@ -169,9 +162,17 @@ class PPOAgent:
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
         return {
-            "mean_reward": np.mean(episode_rewards) if episode_rewards else 0.0,
-            "min_reward": np.min(episode_rewards) if episode_rewards else 0.0,
-            "max_reward": np.max(episode_rewards) if episode_rewards else 0.0,
+            "mean_reward": float(np.mean(episode_rewards) if episode_rewards else 0.0),
+            "min_reward": float(np.min(episode_rewards) if episode_rewards else 0.0),
+            "max_reward": float(np.max(episode_rewards) if episode_rewards else 0.0),
+            "success_rate": float(info.get("success_rate", 0.0)),
+            "episode_time": float(info.get("episode_time", 0.0)),
+            "unit_survival_rate": float(info.get("unit_survival_rate", 0.0)),
+            "destruction_ratio": float(info.get("destruction_ratio", 0.0)),
+            "territory_control": float(info.get("territory_control", 0.0)),
+            "resource_share": float(info.get("resource_share", 0.0)),
+            "our_units": float(info.get("our_units", 0)),
+            "enemy_units": float(info.get("enemy_units", 0)),
         }
 
     def _compute_advantages(self) -> torch.Tensor:
@@ -221,28 +222,29 @@ class PPOAgent:
         advantages: torch.Tensor,
         returns: torch.Tensor,
     ) -> Dict[str, float]:
-        """Train one epoch on collected experience.
-
-        Args:
-            obs: Observations
-            actions: Actions taken
-            old_log_probs: Log probabilities of actions under old policy
-            advantages: Computed advantages
-            returns: Computed returns
-
-        Returns:
-            Dictionary of training metrics
-        """
+        """Train one epoch on collected experience."""
         # Create dataset
         dataset = torch.utils.data.TensorDataset(
             obs, actions, old_log_probs, advantages, returns
         )
+        
+        # Calculate number of minibatches
+        n_samples = len(dataset)
+        batch_size = min(self.config.batch_size, n_samples)
+        n_batches = n_samples // batch_size
+        if n_batches == 0:
+            n_batches = 1
+            batch_size = n_samples
+        
         loader = torch.utils.data.DataLoader(
-            dataset, batch_size=self.config.batch_size, shuffle=True
+            dataset, 
+            batch_size=batch_size,
+            shuffle=True,
+            num_workers=0
         )
 
         # Track metrics
-        metrics = {
+        metrics: Dict[str, list[float]] = {
             "policy_loss": [],
             "value_loss": [],
             "entropy_loss": [],
