@@ -118,6 +118,106 @@ class MetricsTracker:
         """Get standard deviation of episode rewards."""
         return np.std(self.episode_rewards) if len(self.episode_rewards) > 0 else 0.0
 
+    def plot_metrics(self, save_dir: str = "plots") -> None:
+        """Generate and save plots of training metrics.
+
+        Args:
+            save_dir: Directory to save the plots in.
+        """
+        import os
+
+        import matplotlib.pyplot as plt
+
+        # Create plots directory if it doesn't exist
+        os.makedirs(save_dir, exist_ok=True)
+
+        # Common plot settings
+        plt.style.use("seaborn")
+        episodes = range(1, len(self.episode_rewards) + 1)
+
+        # Plot 1: Training Progress (Rewards and Win Rate)
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 10))
+
+        # Rewards
+        ax1.plot(episodes, self.episode_rewards, label="Episode Reward")
+        ax1.set_title("Training Progress - Rewards")
+        ax1.set_xlabel("Episode")
+        ax1.set_ylabel("Reward")
+        ax1.legend()
+
+        # Win Rate
+        ax2.plot(episodes, [float(x) for x in self.win_rates], label="Win Rate")
+        ax2.set_title("Training Progress - Win Rate")
+        ax2.set_xlabel("Episode")
+        ax2.set_ylabel("Win Rate")
+        ax2.legend()
+
+        plt.tight_layout()
+        plt.savefig(os.path.join(save_dir, "training_progress.png"))
+        plt.close()
+
+        # Plot 2: Game Performance Metrics
+        fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 12))
+
+        ax1.plot(episodes, self.success_rates, label="Success Rate")
+        ax1.set_title("Success Action Rate")
+        ax1.set_xlabel("Episode")
+        ax1.set_ylabel("Rate")
+        ax1.legend()
+
+        ax2.plot(episodes, self.survival_rates, label="Survival Rate")
+        ax2.set_title("Unit Survival Rate")
+        ax2.set_xlabel("Episode")
+        ax2.set_ylabel("Rate")
+        ax2.legend()
+
+        ax3.plot(episodes, self.destruction_ratios, label="Destruction Ratio")
+        ax3.set_title("Enemy/Own Units Destroyed Ratio")
+        ax3.set_xlabel("Episode")
+        ax3.set_ylabel("Ratio")
+        ax3.legend()
+
+        ax4.plot(episodes, self.territory_controls, label="Territory Control")
+        ax4.set_title("Territory Control")
+        ax4.set_xlabel("Episode")
+        ax4.set_ylabel("Control %")
+        ax4.legend()
+
+        plt.tight_layout()
+        plt.savefig(os.path.join(save_dir, "game_metrics.png"))
+        plt.close()
+
+        # Plot 3: Resource and Time Metrics
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 10))
+
+        ax1.plot(episodes, self.resource_shares, label="Resource Share")
+        ax1.set_title("Resource Collection Rate")
+        ax1.set_xlabel("Episode")
+        ax1.set_ylabel("Share")
+        ax1.legend()
+
+        ax2.plot(episodes, self.episode_times, label="Episode Time")
+        ax2.set_title("Average Episode Time")
+        ax2.set_xlabel("Episode")
+        ax2.set_ylabel("Time (s)")
+        ax2.legend()
+
+        plt.tight_layout()
+        plt.savefig(os.path.join(save_dir, "resource_time_metrics.png"))
+        plt.close()
+
+        # Plot 4: Algorithm Metrics (Q-Loss)
+        if len(self.q_losses) > 0:
+            plt.figure(figsize=(10, 5))
+            plt.plot(range(1, len(self.q_losses) + 1), self.q_losses, label="Q-Loss")
+            plt.title("Training Loss")
+            plt.xlabel("Episode")
+            plt.ylabel("Loss")
+            plt.legend()
+            plt.tight_layout()
+            plt.savefig(os.path.join(save_dir, "q_loss.png"))
+            plt.close()
+
 
 def train(
     total_timesteps: int = 1_000_000,
@@ -277,6 +377,11 @@ def train(
         print(f"Saving final model to {final_path}...")
         agent.save(final_path)
 
+        # Generate and save training plots
+        plots_dir = os.path.join(save_path, "plots")
+        print(f"Generating training plots in {plots_dir}...")
+        metrics.plot_metrics(plots_dir)
+
         print("Training completed successfully!")
         return agent
 
@@ -378,6 +483,11 @@ def evaluate(
     print(f"Mean destruction ratio: {final_metrics['destruction_ratio/mean']:.2f}")
     print(f"Mean territory control: {final_metrics['territory_control/mean']:.2%}")
     print(f"Mean resource share: {final_metrics['resource_share/mean']:.2%}")
+
+    # Generate and save evaluation plots
+    plots_dir = os.path.join(os.path.dirname(model_path), "eval_plots")
+    print(f"\nGenerating evaluation plots in {plots_dir}...")
+    metrics.plot_metrics(plots_dir)
 
 
 if __name__ == "__main__":
