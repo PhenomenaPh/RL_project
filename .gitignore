@@ -2,3 +2,9 @@
 /.envrc
 /.mypy_cache
 /.venv
+/.poetry.lock
+poetry.lock
+__pycache__/
+*.py[cod]
+*$py.class
+.poetry.lock
