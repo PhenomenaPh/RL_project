@@ -255,36 +255,9 @@ class StrategyGameEnv(gym.Env):
 
     def _calculate_reward(self) -> float:
         """Calculate reward for current step."""
+        assert self.game is not None
         reward = 0.0
 
-        # Money reward
-        money_diff = self.game.money[1] - self.game.money[0]
-        reward += 0.1 * money_diff
-
-        # Unit advantage reward
-        our_units = 0
-        enemy_units = 0
-        for unit in self.game.units:
-            if unit.hp <= 0:
-                continue
-            if unit.team == 1:
-                our_units += 1
-            else:
-                enemy_units += 1
-
-        unit_diff = our_units - enemy_units
-        reward += 0.5 * unit_diff
-
-        # Victory reward
-        if enemy_units == 0 and our_units > 0:
-            reward += 10.0
-        elif our_units == 0 and enemy_units > 0:
-            reward -= 10.0
-
-        return reward
-
-    def _check_done(self) -> bool:
-        """Check if episode is done."""
         # Count units
         our_units = 0
         enemy_units = 0
@@ -296,8 +269,65 @@ class StrategyGameEnv(gym.Env):
             else:
                 enemy_units += 1
 
-        # Game is done if either team is eliminated
-        return our_units == 0 or enemy_units == 0
+        # Gold difference reward (primary objective)
+        gold_ratio = self.game.money[1] / max(1, self.game.money[0])
+        reward += 0.5 * (gold_ratio - 1.0)  # Reward for having more gold than opponent
+
+        # Unit advantage reward (secondary objective)
+        unit_ratio = our_units / max(1, enemy_units)
+        reward += 0.3 * (unit_ratio - 1.0)  # Reward for having more units than opponent
+
+        # Victory rewards
+        if our_units == 0 and self.game.money[1] < self.game.money[0]:
+            # Lost both economically and militarily
+            reward -= 10.0
+        elif enemy_units == 0 and self.game.money[0] < self.game.money[1]:
+            # Won both economically and militarily
+            reward += 10.0
+        elif self.game.money[1] > 2 * self.game.money[0] and our_units > enemy_units:
+            # Economic and military dominance
+            reward += 5.0
+        elif self.game.money[0] > 2 * self.game.money[1] and enemy_units > our_units:
+            # Enemy economic and military dominance
+            reward -= 5.0
+
+        return reward
+
+    def _check_done(self) -> bool:
+        """Check if episode is done."""
+        assert self.game is not None
+
+        # Count units and gold
+        our_units = 0
+        enemy_units = 0
+        for unit in self.game.units:
+            if unit.hp <= 0:
+                continue
+            if unit.team == 1:
+                our_units += 1
+            else:
+                enemy_units += 1
+
+        our_gold = self.game.money[1]
+        enemy_gold = self.game.money[0]
+
+        # Game is done if:
+        # 1. One team has no units AND less gold
+        # 2. One team has significantly more gold (2x) and more units
+        # 3. Maximum steps reached (handled in step method)
+        
+        if our_units == 0 and our_gold < enemy_gold:
+            return True
+        if enemy_units == 0 and enemy_gold < our_gold:
+            return True
+        
+        # Check for economic and military dominance
+        if our_gold > 2 * enemy_gold and our_units > enemy_units:
+            return True
+        if enemy_gold > 2 * our_gold and enemy_units > our_units:
+            return True
+
+        return False
 
     def render(self) -> np.ndarray:
         """Render current game state."""

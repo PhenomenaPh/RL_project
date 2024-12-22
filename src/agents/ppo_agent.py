@@ -61,11 +61,17 @@ class ActorCriticPolicy(nn.Module):
     def evaluate_actions(
         self, obs: torch.Tensor, actions: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        mean, std, values = self(obs)
+        """Evaluate actions and compute values."""
+        features = self.features(obs)
+        mean = self.mean(features)
+        std = torch.exp(self.log_std)
+        value = self.value(features).squeeze(-1)
+        
         dist = Normal(mean, std)
         log_probs = dist.log_prob(actions).sum(dim=-1)
         entropy = dist.entropy().sum(dim=-1)
-        return log_probs, values.squeeze(-1), entropy
+        
+        return log_probs, value, entropy
 
     def predict(self, obs: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         with torch.no_grad():
@@ -80,7 +86,7 @@ class PPOAgent:
     """PPO agent for training and inference."""
 
     def __init__(
-        self, state_dim: int, action_dim: int, config: PPOConfig = PPOConfig()
+        self, state_dim: int, action_dim: int, config: PPOConfig = PPOConfig(), device: str = "auto"
     ):
         """Initialize PPO agent.
 
@@ -88,9 +94,15 @@ class PPOAgent:
             state_dim: Dimension of state space
             action_dim: Dimension of action space
             config: PPO configuration
+            device: Device to use for training ('auto', 'cuda', or 'cpu')
         """
         self.config = config
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        
+        # Set device
+        if device == "auto":
+            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        else:
+            self.device = torch.device(device)
 
         # Initialize policy
         self.policy = ActorCriticPolicy(state_dim, action_dim).to(self.device)
@@ -113,53 +125,75 @@ class PPOAgent:
         self.reset_buffers()
         obs, _ = env.reset()
 
+        print(f"\nInitial observation shape: {obs.shape}")
+
         episode_rewards = []
         current_rewards = []
 
         for step in range(self.config.n_steps):
             # Convert observation to tensor
-            obs_tensor = torch.FloatTensor(obs).unsqueeze(0).to(self.device)
+            obs_tensor = torch.FloatTensor(obs).to(self.device).unsqueeze(0)
+            if step == 0:
+                print(f"Observation tensor shape: {obs_tensor.shape}")
 
             # Get action from policy
             with torch.no_grad():
                 action, log_prob = self.policy.predict(obs_tensor)
                 _, _, value = self.policy(obs_tensor)
+                if step == 0:
+                    print(f"Action shape: {action.shape}")
+                    print(f"Log prob shape: {log_prob.shape}")
+                    print(f"Value shape: {value.shape}")
 
             # Execute action
             next_obs, reward, done, truncated, info = env.step(action.cpu().numpy()[0])
 
-            # Store experience
+            # Store experience (keep everything on CPU during collection)
             self.obs_buffer.append(obs)
-            self.action_buffer.append(action[0])  # Remove batch dimension
+            self.action_buffer.append(action[0].cpu())
             self.reward_buffer.append(reward)
-            self.value_buffer.append(value[0])  # Remove batch dimension
-            self.log_prob_buffer.append(log_prob[0])  # Remove batch dimension
+            self.value_buffer.append(value[0].cpu())
+            self.log_prob_buffer.append(log_prob[0].cpu())
             self.done_buffer.append(done)
 
             # Track rewards
             current_rewards.append(reward)
 
             if done or truncated:
-                episode_rewards.append(float(np.sum(current_rewards)))  # Use numpy sum
+                episode_rewards.append(float(np.sum(current_rewards)))
                 current_rewards = []
                 obs, _ = env.reset()
             else:
                 obs = next_obs
 
-        # Convert buffers to tensors more efficiently
-        self.obs_buffer = torch.FloatTensor(np.array(self.obs_buffer)).to(self.device)
-        self.action_buffer = torch.stack(self.action_buffer)
-        self.reward_buffer = torch.FloatTensor(np.array(self.reward_buffer)).to(self.device)
-        self.value_buffer = torch.cat(self.value_buffer)
-        self.log_prob_buffer = torch.stack(self.log_prob_buffer)
-        self.done_buffer = torch.FloatTensor(np.array(self.done_buffer)).to(self.device)
+        # Convert lists to numpy arrays first
+        obs_array = np.array(self.obs_buffer)
+        reward_array = np.array(self.reward_buffer)
+        done_array = np.array(self.done_buffer)
 
-        # Compute advantages and returns
-        advantages = self._compute_advantages()
-        returns = advantages + self.value_buffer
+        print("\nBuffer shapes before conversion to tensors:")
+        print(f"obs_array shape: {obs_array.shape}")
+        print(f"reward_array shape: {reward_array.shape}")
+        print(f"done_array shape: {done_array.shape}")
+        print(f"action_buffer length: {len(self.action_buffer)}")
+        print(f"value_buffer length: {len(self.value_buffer)}")
+        print(f"log_prob_buffer length: {len(self.log_prob_buffer)}")
 
-        # Normalize advantages
-        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+        # Convert buffers to tensors and move to device
+        self.obs_buffer = torch.FloatTensor(obs_array).to(self.device)
+        self.action_buffer = torch.stack(self.action_buffer).to(self.device)
+        self.reward_buffer = torch.FloatTensor(reward_array).to(self.device)
+        self.value_buffer = torch.stack(self.value_buffer).to(self.device)
+        self.log_prob_buffer = torch.stack(self.log_prob_buffer).to(self.device)
+        self.done_buffer = torch.FloatTensor(done_array).to(self.device)
+
+        print("\nFinal buffer tensor shapes:")
+        print(f"obs_buffer: {self.obs_buffer.shape}")
+        print(f"action_buffer: {self.action_buffer.shape}")
+        print(f"reward_buffer: {self.reward_buffer.shape}")
+        print(f"value_buffer: {self.value_buffer.shape}")
+        print(f"log_prob_buffer: {self.log_prob_buffer.shape}")
+        print(f"done_buffer: {self.done_buffer.shape}")
 
         return {
             "mean_reward": float(np.mean(episode_rewards) if episode_rewards else 0.0),
@@ -179,9 +213,8 @@ class PPOAgent:
         """Compute GAE advantages."""
         # Get last value for bootstrapping
         with torch.no_grad():
-            last_obs = (
-                torch.FloatTensor(self.obs_buffer[-1]).unsqueeze(0).to(self.device)
-            )
+            # obs_buffer is already on the correct device
+            last_obs = self.obs_buffer[-1].unsqueeze(0)
             _, _, last_value = self.policy(last_obs)
             last_value = last_value.squeeze()
 
@@ -223,18 +256,43 @@ class PPOAgent:
         returns: torch.Tensor,
     ) -> Dict[str, float]:
         """Train one epoch on collected experience."""
+        # Print initial tensor shapes
+        print("\nInput tensor shapes:")
+        print(f"obs: {obs.shape}")
+        print(f"actions: {actions.shape}")
+        print(f"old_log_probs: {old_log_probs.shape}")
+        print(f"advantages: {advantages.shape}")
+        print(f"returns: {returns.shape}")
+
+        # Ensure all tensors are on the correct device and have correct shape
+        obs = obs.to(self.device)
+        actions = actions.to(self.device)
+        old_log_probs = old_log_probs.to(self.device).flatten()
+        advantages = advantages.to(self.device).flatten()
+        returns = returns.to(self.device).flatten()
+
+        # Print shapes after device transfer and flattening
+        print("\nShapes after device transfer and flattening:")
+        print(f"obs: {obs.shape}")
+        print(f"actions: {actions.shape}")
+        print(f"old_log_probs: {old_log_probs.shape}")
+        print(f"advantages: {advantages.shape}")
+        print(f"returns: {returns.shape}")
+
         # Create dataset
-        dataset = torch.utils.data.TensorDataset(
-            obs, actions, old_log_probs, advantages, returns
-        )
+        try:
+            dataset = torch.utils.data.TensorDataset(
+                obs, actions, old_log_probs, advantages, returns
+            )
+            print("\nDataset created successfully")
+        except Exception as e:
+            print("\nError creating dataset:")
+            print(f"Exception: {str(e)}")
+            raise
         
-        # Calculate number of minibatches
-        n_samples = len(dataset)
-        batch_size = min(self.config.batch_size, n_samples)
-        n_batches = n_samples // batch_size
-        if n_batches == 0:
-            n_batches = 1
-            batch_size = n_samples
+        batch_size = min(self.config.batch_size, len(dataset))
+        print(f"\nBatch size: {batch_size}")
+        print(f"Dataset length: {len(dataset)}")
         
         loader = torch.utils.data.DataLoader(
             dataset, 
@@ -243,8 +301,7 @@ class PPOAgent:
             num_workers=0
         )
 
-        # Track metrics
-        metrics: Dict[str, list[float]] = {
+        metrics = {
             "policy_loss": [],
             "value_loss": [],
             "entropy_loss": [],
@@ -252,23 +309,40 @@ class PPOAgent:
             "clip_fraction": [],
         }
 
-        # Train for n_epochs
-        for _ in range(self.config.n_epochs):
-            for batch in loader:
-                (
-                    batch_obs,
-                    batch_actions,
-                    batch_old_log_probs,
-                    batch_advantages,
-                    batch_returns,
-                ) = batch
+        for epoch in range(self.config.n_epochs):
+            print(f"\nStarting epoch {epoch + 1}/{self.config.n_epochs}")
+            for batch_idx, batch in enumerate(loader):
+                batch_obs, batch_actions, batch_old_log_probs, batch_advantages, batch_returns = batch
 
-                # Evaluate actions under current policy
+                # Print batch shapes
+                if batch_idx == 0:  # Only print for first batch
+                    print(f"\nBatch shapes (batch {batch_idx}):")
+                    print(f"batch_obs: {batch_obs.shape}")
+                    print(f"batch_actions: {batch_actions.shape}")
+                    print(f"batch_old_log_probs: {batch_old_log_probs.shape}")
+                    print(f"batch_advantages: {batch_advantages.shape}")
+                    print(f"batch_returns: {batch_returns.shape}")
+
+                # Evaluate actions
                 log_probs, values, entropy = self.policy.evaluate_actions(
                     batch_obs, batch_actions
                 )
 
-                # Calculate policy loss
+                if batch_idx == 0:  # Only print for first batch
+                    print(f"\nNetwork output shapes (batch {batch_idx}):")
+                    print(f"log_probs: {log_probs.shape}")
+                    print(f"values: {values.shape}")
+                    print(f"entropy: {entropy.shape}")
+
+                # Ensure all tensors are properly shaped
+                values = values.flatten()
+                log_probs = log_probs.flatten()
+                entropy = entropy.flatten()
+                batch_advantages = batch_advantages.flatten()
+                batch_returns = batch_returns.flatten()
+                batch_old_log_probs = batch_old_log_probs.flatten()
+
+                # Policy loss
                 ratio = torch.exp(log_probs - batch_old_log_probs)
                 policy_loss1 = -batch_advantages * ratio
                 policy_loss2 = -batch_advantages * torch.clamp(
@@ -276,13 +350,13 @@ class PPOAgent:
                 )
                 policy_loss = torch.mean(torch.max(policy_loss1, policy_loss2))
 
-                # Calculate value loss
+                # Value loss
                 value_loss = torch.mean(torch.square(values - batch_returns))
 
-                # Calculate entropy loss
+                # Entropy loss
                 entropy_loss = -torch.mean(entropy)
 
-                # Calculate total loss
+                # Total loss
                 loss = (
                     policy_loss
                     + self.config.vf_coef * value_loss
@@ -298,27 +372,16 @@ class PPOAgent:
                 self.optimizer.step()
 
                 # Track metrics
-                with torch.no_grad():
-                    metrics["policy_loss"].append(policy_loss.item())
-                    metrics["value_loss"].append(value_loss.item())
-                    metrics["entropy_loss"].append(entropy_loss.item())
-                    metrics["kl_div"].append(
-                        torch.mean(batch_old_log_probs - log_probs).item()
-                    )
-                    metrics["clip_fraction"].append(
-                        torch.mean(
-                            (torch.abs(ratio - 1) > self.config.clip_range).float()
-                        ).item()
-                    )
+                metrics["policy_loss"].append(policy_loss.item())
+                metrics["value_loss"].append(value_loss.item())
+                metrics["entropy_loss"].append(entropy_loss.item())
+                metrics["kl_div"].append(
+                    torch.mean(batch_old_log_probs - log_probs).item()
+                )
+                metrics["clip_fraction"].append(
+                    torch.mean((torch.abs(ratio - 1) > self.config.clip_range).float()).item()
+                )
 
-                # Early stopping based on KL divergence
-                if (
-                    self.config.target_kl is not None
-                    and metrics["kl_div"][-1] > 1.5 * self.config.target_kl
-                ):
-                    break
-
-        # Average metrics
         return {k: np.mean(v) for k, v in metrics.items()}
 
     def save(self, path: str) -> None:

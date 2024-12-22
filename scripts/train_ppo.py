@@ -125,31 +125,36 @@ class MetricsTracker:
             save_dir: Directory to save the plots in.
         """
         import os
-
         import matplotlib.pyplot as plt
 
         # Create plots directory if it doesn't exist
         os.makedirs(save_dir, exist_ok=True)
 
         # Common plot settings
-        plt.style.use("seaborn")
+        plt.style.use("default")  # Using default style instead of seaborn
+        plt.rcParams['figure.facecolor'] = 'white'
+        plt.rcParams['axes.facecolor'] = 'white'
+        plt.rcParams['grid.linestyle'] = '--'
+        plt.rcParams['grid.alpha'] = 0.5
         episodes = range(1, len(self.episode_rewards) + 1)
 
         # Plot 1: Training Progress (Rewards and Win Rate)
         fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 10))
 
         # Rewards
-        ax1.plot(episodes, self.episode_rewards, label="Episode Reward")
+        ax1.plot(episodes, self.episode_rewards, label="Episode Reward", color='blue')
         ax1.set_title("Training Progress - Rewards")
         ax1.set_xlabel("Episode")
         ax1.set_ylabel("Reward")
+        ax1.grid(True)
         ax1.legend()
 
         # Win Rate
-        ax2.plot(episodes, [float(x) for x in self.win_rates], label="Win Rate")
+        ax2.plot(episodes, [float(x) for x in self.win_rates], label="Win Rate", color='green')
         ax2.set_title("Training Progress - Win Rate")
         ax2.set_xlabel("Episode")
         ax2.set_ylabel("Win Rate")
+        ax2.grid(True)
         ax2.legend()
 
         plt.tight_layout()
@@ -159,28 +164,32 @@ class MetricsTracker:
         # Plot 2: Game Performance Metrics
         fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 12))
 
-        ax1.plot(episodes, self.success_rates, label="Success Rate")
+        ax1.plot(episodes, self.success_rates, label="Success Rate", color='purple')
         ax1.set_title("Success Action Rate")
         ax1.set_xlabel("Episode")
         ax1.set_ylabel("Rate")
+        ax1.grid(True)
         ax1.legend()
 
-        ax2.plot(episodes, self.survival_rates, label="Survival Rate")
+        ax2.plot(episodes, self.survival_rates, label="Survival Rate", color='orange')
         ax2.set_title("Unit Survival Rate")
         ax2.set_xlabel("Episode")
         ax2.set_ylabel("Rate")
+        ax2.grid(True)
         ax2.legend()
 
-        ax3.plot(episodes, self.destruction_ratios, label="Destruction Ratio")
+        ax3.plot(episodes, self.destruction_ratios, label="Destruction Ratio", color='red')
         ax3.set_title("Enemy/Own Units Destroyed Ratio")
         ax3.set_xlabel("Episode")
         ax3.set_ylabel("Ratio")
+        ax3.grid(True)
         ax3.legend()
 
-        ax4.plot(episodes, self.territory_controls, label="Territory Control")
+        ax4.plot(episodes, self.territory_controls, label="Territory Control", color='brown')
         ax4.set_title("Territory Control")
         ax4.set_xlabel("Episode")
         ax4.set_ylabel("Control %")
+        ax4.grid(True)
         ax4.legend()
 
         plt.tight_layout()
@@ -190,16 +199,18 @@ class MetricsTracker:
         # Plot 3: Resource and Time Metrics
         fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 10))
 
-        ax1.plot(episodes, self.resource_shares, label="Resource Share")
+        ax1.plot(episodes, self.resource_shares, label="Resource Share", color='gold')
         ax1.set_title("Resource Collection Rate")
         ax1.set_xlabel("Episode")
         ax1.set_ylabel("Share")
+        ax1.grid(True)
         ax1.legend()
 
-        ax2.plot(episodes, self.episode_times, label="Episode Time")
+        ax2.plot(episodes, self.episode_times, label="Episode Time", color='gray')
         ax2.set_title("Average Episode Time")
         ax2.set_xlabel("Episode")
         ax2.set_ylabel("Time (s)")
+        ax2.grid(True)
         ax2.legend()
 
         plt.tight_layout()
@@ -209,10 +220,11 @@ class MetricsTracker:
         # Plot 4: Algorithm Metrics (Q-Loss)
         if len(self.q_losses) > 0:
             plt.figure(figsize=(10, 5))
-            plt.plot(range(1, len(self.q_losses) + 1), self.q_losses, label="Q-Loss")
+            plt.plot(range(1, len(self.q_losses) + 1), self.q_losses, label="Q-Loss", color='cyan')
             plt.title("Training Loss")
             plt.xlabel("Episode")
             plt.ylabel("Loss")
+            plt.grid(True)
             plt.legend()
             plt.tight_layout()
             plt.savefig(os.path.join(save_dir, "q_loss.png"))
@@ -233,7 +245,7 @@ def train(
     max_grad_norm: float = 0.5,
     target_kl: Optional[float] = 0.015,
     seed: Optional[int] = None,
-    device: str = "auto",
+    device: str = "cuda",
     log_interval: int = 1,
     save_path: str = "models",
     opponent: str = "balanced",
@@ -300,8 +312,9 @@ def train(
             state_dim=state_dim,
             action_dim=action_dim,
             config=config,
+            device=device
         )
-        print(f"Agent initialized with state_dim={state_dim}, action_dim={action_dim}")
+        print(f"Agent initialized with state_dim={state_dim}, action_dim={action_dim}, device={device}")
 
         # Initialize metrics tracker
         print("Initializing metrics tracker...")
@@ -326,13 +339,25 @@ def train(
                 timesteps_elapsed += agent.config.n_steps
                 pbar.update(agent.config.n_steps)
 
+                # Compute advantages and returns
+                with torch.no_grad():
+                    advantages = agent._compute_advantages()
+                    returns = advantages + agent.value_buffer.squeeze(-1)
+                    # Normalize advantages
+                    advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+
+                # Print shapes for debugging
+                print(f"\nAdvantages shape: {advantages.shape}")
+                print(f"Returns shape: {returns.shape}")
+                print(f"Value buffer shape: {agent.value_buffer.shape}")
+
                 # Train on collected experience
                 train_metrics = agent.train_epoch(
-                    agent.obs_buffer,
-                    agent.action_buffer,
-                    agent.log_prob_buffer,
-                    agent._compute_advantages(),
-                    agent._compute_advantages() + agent.value_buffer,
+                    obs=agent.obs_buffer,
+                    actions=agent.action_buffer,
+                    old_log_probs=agent.log_prob_buffer,
+                    advantages=advantages.detach(),
+                    returns=returns.detach()
                 )
 
                 # Update metrics

@@ -2,6 +2,7 @@
 
 import os
 import sys
+import torch
 from datetime import datetime
 
 # Add the project root directory to Python path
@@ -57,6 +58,21 @@ def run_training(
         target_kl: Target KL divergence threshold for early stopping
         log_interval: Number of timesteps between logging events
     """
+    # Determine device
+    if device == "auto":
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+    
+    # Print device info
+    if device == "cuda":
+        print(f"Using GPU: {torch.cuda.get_device_name(0)}")
+        # Optimize settings for GPU
+        batch_size = 128
+        n_steps = 2048
+        learning_rate = 3e-4
+        ent_coef = 0.01
+    else:
+        print("Using CPU")
+    
     # Create experiment directory
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     experiment_dir = os.path.join(save_path, f"{experiment_name}_{timestamp}")
@@ -85,6 +101,15 @@ def run_training(
         "log_interval": log_interval,
     }
 
+    print("\nTraining configuration:")
+    for key, value in config.items():
+        if isinstance(value, dict):
+            print(f"{key}:")
+            for k, v in value.items():
+                print(f"  {k}: {v}")
+        else:
+            print(f"{key}: {value}")
+
     # Train agent
     trained_agent = train(
         total_timesteps=total_timesteps,
@@ -110,30 +135,11 @@ def run_training(
 
 
 if __name__ == "__main__":
-    # Example usage:
-
-    # 1. Basic training with default parameters
+    # Example usage with CUDA-optimized settings
     agent = run_training(
-        experiment_name="basic_training",
-        total_timesteps=100_000,  # Reduced for example
+        experiment_name="cuda_training",
+        total_timesteps=10_000,
+        device="cuda",  # Will automatically use CUDA if available
+        opponent="balanced",
+        seed=42  # For reproducibility
     )
-
-    # 2. Training against different opponents
-    opponents = ["balanced", "adaptive", "archer", "worker_rush", "army"]
-    for opponent in opponents:
-        agent = run_training(
-            experiment_name=f"opponent_{opponent}",
-            total_timesteps=100_000,  # Reduced for example
-            opponent=opponent,
-            seed=42,  # For reproducibility
-        )
-
-    # 3. Hyperparameter experimentation
-    learning_rates = [1e-4, 3e-4, 1e-3]
-    for lr in learning_rates:
-        agent = run_training(
-            experiment_name="lr_sweep",
-            total_timesteps=100_000,  # Reduced for example
-            learning_rate=lr,
-            seed=42,  # For reproducibility
-        )
