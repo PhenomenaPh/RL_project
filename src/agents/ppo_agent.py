@@ -33,28 +33,55 @@ class ActorCriticPolicy(nn.Module):
     """Combined actor-critic network."""
 
     def __init__(self, state_dim: int, action_dim: int):
+        """Initialize the policy network.
+        
+        Args:
+            state_dim: Dimension of state space (encoded image + stats)
+            action_dim: Dimension of action space (8: 6 unit probs + 2 coords)
+        """
         super().__init__()
+        
+        # Ensure action dimension is correct
+        assert action_dim == 8, f"Action dimension must be 8, got {action_dim}"
 
         # Shared feature extractor
         self.features = nn.Sequential(
-            nn.Linear(state_dim, 256), nn.ReLU(), nn.Linear(256, 128), nn.ReLU()
+            nn.Linear(state_dim, 256),
+            nn.ReLU(),
+            nn.Linear(256, 128),
+            nn.ReLU()
         )
 
         # Policy head (actor)
         self.mean = nn.Sequential(
-            nn.Linear(128, 64), nn.ReLU(), nn.Linear(64, action_dim), nn.Tanh()
+            nn.Linear(128, 64),
+            nn.ReLU(),
+            nn.Linear(64, action_dim),  # Output 8-dimensional action
+            nn.Tanh()  # Bound outputs to [-1, 1]
         )
         self.log_std = nn.Parameter(torch.zeros(action_dim))
 
         # Value head (critic)
-        self.value = nn.Sequential(nn.Linear(128, 64), nn.ReLU(), nn.Linear(64, 1))
+        self.value = nn.Sequential(
+            nn.Linear(128, 64),
+            nn.ReLU(),
+            nn.Linear(64, 1)
+        )
 
-    def forward(
-        self, x: torch.Tensor
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Forward pass through the network.
+        
+        Args:
+            x: Input tensor of shape (batch_size, state_dim)
+            
+        Returns:
+            mean: Action mean of shape (batch_size, 8)
+            std: Action standard deviation of shape (batch_size, 8)
+            value: Value estimate of shape (batch_size, 1)
+        """
         features = self.features(x)
-        mean = self.mean(features)
-        std = torch.exp(self.log_std)
+        mean = self.mean(features)  # Shape: (batch_size, 8)
+        std = torch.exp(self.log_std)  # Shape: (8,) -> broadcast to batch
         value = self.value(features)
         return mean, std, value
 
@@ -74,12 +101,27 @@ class ActorCriticPolicy(nn.Module):
         return log_probs, value, entropy
 
     def predict(self, obs: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Generate action and log probability from observation."""
         with torch.no_grad():
             mean, std, _ = self(obs)
             dist = Normal(mean, std)
             actions = dist.sample()
+            
+            # Ensure actions are in correct shape (batch_size, 8)
+            if len(actions.shape) == 1:
+                actions = actions.unsqueeze(0)  # Add batch dimension if missing
+            
+            # Validate action shape
+            if actions.shape[-1] != 8:
+                print(f"Warning: Invalid action shape {actions.shape}, expected (batch_size, 8)")
+                # Pad or truncate actions to correct size
+                padded_actions = torch.zeros(actions.shape[0], 8, device=actions.device)
+                padded_actions[:, :actions.shape[-1]] = actions[:, :8]
+                actions = padded_actions
+            
             log_probs = dist.log_prob(actions).sum(dim=-1)
-        return actions, log_probs
+            
+            return actions, log_probs
 
 
 class PPOAgent:
@@ -154,7 +196,7 @@ class PPOAgent:
             self.reward_buffer.append(torch.tensor(reward, dtype=torch.float32))
             self.value_buffer.append(value.cpu().squeeze(0))  # Squeeze to remove batch dim
             self.log_prob_buffer.append(log_prob.cpu().squeeze(0))  # Squeeze to remove batch dim
-            self.done_buffer.append(torch.tensor(done, dtype=torch.float32)).
+            self.done_buffer.append(torch.tensor(done, dtype=torch.float32))
 
             # Track rewards
             current_rewards.append(reward)
@@ -390,4 +432,4 @@ class PPOAgent:
 
     def load(self, path: str) -> None:
         """Load policy state dict."""
-        self.policy.load_state_dict(torch.load(path))
+        self.policy.load_state_dict(torch.load(path, weights_only=True))

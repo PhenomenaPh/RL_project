@@ -3,7 +3,8 @@
 import argparse
 import os
 from collections import deque
-from typing import Dict, Optional
+from typing import Dict, Optional, List, Any
+import time
 
 import numpy as np
 import torch
@@ -21,214 +22,182 @@ from src.environment.mini_strat_game import (
 
 
 class MetricsTracker:
-    """Tracks and computes training metrics."""
+    """Tracks training metrics."""
 
-    def __init__(self, window_size: int = 100):
-        self.window_size = window_size
-        self.reset()
+    def __init__(self):
+        """Initialize metrics tracker."""
+        self.episode_rewards = []
+        self.episode_lengths = []
+        self.episode_times = []
+        self.success_rates = []
+        self.unit_survival_rates = []
+        self.territory_controls = []
+        self.units_created = []
+        self.kills_vs_friendly = []
+        self.gold_ratios = []
+        self.gold_vs_opponent = []
+        self.current_episode_reward = 0.0
 
-    def reset(self):
-        """Reset all metrics."""
-        self.episode_rewards = deque(maxlen=self.window_size)
-        self.episode_lengths = deque(maxlen=self.window_size)
-        self.win_rates = deque(maxlen=self.window_size)
-        self.success_rates = deque(maxlen=self.window_size)
-        self.episode_times = deque(maxlen=self.window_size)
-        self.survival_rates = deque(maxlen=self.window_size)
-        self.destruction_ratios = deque(maxlen=self.window_size)
-        self.territory_controls = deque(maxlen=self.window_size)
-        self.resource_shares = deque(maxlen=self.window_size)
-        self.q_losses = deque(maxlen=self.window_size)
+    def update(self, reward: float, info: Dict[str, Any], done: bool) -> None:
+        """Update metrics with new data."""
+        self.current_episode_reward += reward
 
-        self.baseline_win_rate = None
-        self.baseline_reward = None
-        self.episode_count = 0
+        if done:
+            self.episode_rewards.append(self.current_episode_reward)
+            self.current_episode_reward = 0.0
+            
+            # Track episode metrics
+            self.episode_times.append(info.get("episode_time", 0.0))
+            self.success_rates.append(info.get("success_rate", 0.0))
+            self.unit_survival_rates.append(info.get("unit_survival_rate", 0.0))
+            self.territory_controls.append(info.get("territory_control", 0.0))
+            
+            # Track unit metrics
+            our_units = info.get("our_units", 0)
+            enemy_units = info.get("enemy_units", 0)
+            self.units_created.append(our_units)
+            
+            # Track gold metrics
+            self.gold_ratios.append(info.get("gold_ratio", 0.0))
+            self.gold_vs_opponent.append(info.get("gold_vs_opponent", 0.0))
+            
+            # Track combat metrics
+            kills_ratio = our_units / (enemy_units + 1e-8)  # Avoid division by zero
+            self.kills_vs_friendly.append(kills_ratio)
 
-    def update(
-        self,
-        episode_reward: float,
-        episode_length: int,
-        info: Dict,
-        q_loss: Optional[float] = None,
-    ):
-        """Update metrics with new episode results."""
-        self.episode_rewards.append(episode_reward)
-        self.episode_lengths.append(episode_length)
-
-        # Game metrics
-        win = info["our_units"] > 0 and info["enemy_units"] == 0
-        self.win_rates.append(float(win))
-        self.success_rates.append(info["success_rate"])
-        self.episode_times.append(info["episode_time"])
-        self.survival_rates.append(info["unit_survival_rate"])
-        self.destruction_ratios.append(info["destruction_ratio"])
-        self.territory_controls.append(info["territory_control"])
-        self.resource_shares.append(info["resource_share"])
-
-        # Algorithm metrics
-        if q_loss is not None:
-            self.q_losses.append(q_loss)
-
-        self.episode_count += 1
-
-        # Set baseline after first 100 episodes
-        if self.episode_count == 100:
-            self.baseline_win_rate = self.get_win_rate()
-            self.baseline_reward = self.get_mean_reward()
-
-    def get_metrics(self) -> Dict:
+    def get_metrics(self) -> Dict[str, float]:
         """Get current metrics."""
-        metrics = {
-            "reward/mean": self.get_mean_reward(),
-            "reward/std": self.get_std_reward(),
-            "length/mean": np.mean(self.episode_lengths),
-            "win_rate": self.get_win_rate(),
-            "success_rate/mean": np.mean(self.success_rates),
-            "episode_time/mean": np.mean(self.episode_times),
-            "survival_rate/mean": np.mean(self.survival_rates),
-            "destruction_ratio/mean": np.mean(self.destruction_ratios),
-            "territory_control/mean": np.mean(self.territory_controls),
-            "resource_share/mean": np.mean(self.resource_shares),
-        }
-
-        # Add Q-loss if available
-        if len(self.q_losses) > 0:
-            metrics["loss/q_value"] = np.mean(self.q_losses)
-
-        # Add improvement metrics after baseline is set
-        if self.baseline_win_rate is not None:
-            metrics["improvement/win_rate"] = (
-                self.get_win_rate() - self.baseline_win_rate
-            )
-            metrics["improvement/reward"] = (
-                self.get_mean_reward() - self.baseline_reward
-            )
-
+        metrics = {}
+        
+        # Episode metrics
+        if self.episode_rewards:
+            metrics["mean_reward"] = float(np.mean(self.episode_rewards[-100:]))
+            metrics["std_reward"] = float(np.std(self.episode_rewards[-100:]))
+        
+        # Success metrics
+        if self.success_rates:
+            metrics["success_rate"] = float(np.mean(self.success_rates[-100:]))
+        
+        # Time metrics
+        if self.episode_times:
+            metrics["mean_episode_time"] = float(np.mean(self.episode_times[-100:]))
+        
+        # Unit metrics
+        if self.unit_survival_rates:
+            metrics["survival_rate"] = float(np.mean(self.unit_survival_rates[-100:]))
+        if self.units_created:
+            metrics["units_created"] = float(np.mean(self.units_created[-100:]))
+        if self.kills_vs_friendly:
+            metrics["kills_friendly_ratio"] = float(np.mean(self.kills_vs_friendly[-100:]))
+        
+        # Territory metrics
+        if self.territory_controls:
+            metrics["territory_control"] = float(np.mean(self.territory_controls[-100:]))
+        
+        # Gold metrics
+        if self.gold_ratios:
+            metrics["gold_ratio"] = float(np.mean(self.gold_ratios[-100:]))
+        if self.gold_vs_opponent:
+            metrics["gold_vs_opponent"] = float(np.mean(self.gold_vs_opponent[-100:]))
+        
         return metrics
 
-    def get_win_rate(self) -> float:
-        """Get current win rate."""
-        return np.mean(self.win_rates) if len(self.win_rates) > 0 else 0.0
-
-    def get_mean_reward(self) -> float:
-        """Get mean episode reward."""
-        return np.mean(self.episode_rewards) if len(self.episode_rewards) > 0 else 0.0
-
-    def get_std_reward(self) -> float:
-        """Get standard deviation of episode rewards."""
-        return np.std(self.episode_rewards) if len(self.episode_rewards) > 0 else 0.0
-
     def plot_metrics(self, save_dir: str = "plots") -> None:
-        """Generate and save plots of training metrics.
-
-        Args:
-            save_dir: Directory to save the plots in.
-        """
+        """Generate and save plots of training metrics."""
         import os
         import matplotlib.pyplot as plt
+        import seaborn as sns
 
-        # Create plots directory if it doesn't exist
+        # Create plots directory
         os.makedirs(save_dir, exist_ok=True)
 
-        # Common plot settings
-        plt.style.use("default")  # Using default style instead of seaborn
-        plt.rcParams['figure.facecolor'] = 'white'
-        plt.rcParams['axes.facecolor'] = 'white'
-        plt.rcParams['grid.linestyle'] = '--'
-        plt.rcParams['grid.alpha'] = 0.5
-        episodes = range(1, len(self.episode_rewards) + 1)
+        # Set style
+        sns.set_palette("husl")
 
-        # Plot 1: Training Progress (Rewards and Win Rate)
-        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 10))
+        # Create a single large figure with all metrics
+        fig = plt.figure(figsize=(20, 24))
+        gs = plt.GridSpec(6, 2, figure=fig)
+        fig.suptitle("Training Metrics Dashboard", fontsize=20, y=0.95)
 
-        # Rewards
-        ax1.plot(episodes, self.episode_rewards, label="Episode Reward", color='blue')
-        ax1.set_title("Training Progress - Rewards")
+        # Plot episode rewards
+        ax1 = fig.add_subplot(gs[0, 0])
+        if self.episode_rewards:
+            sns.lineplot(x=range(len(self.episode_rewards)), y=self.episode_rewards, ax=ax1)
+        ax1.set_title("Total Reward per Episode")
         ax1.set_xlabel("Episode")
         ax1.set_ylabel("Reward")
-        ax1.grid(True)
-        ax1.legend()
 
-        # Win Rate
-        ax2.plot(episodes, [float(x) for x in self.win_rates], label="Win Rate", color='green')
-        ax2.set_title("Training Progress - Win Rate")
-        ax2.set_xlabel("Episode")
-        ax2.set_ylabel("Win Rate")
-        ax2.grid(True)
-        ax2.legend()
-
-        plt.tight_layout()
-        plt.savefig(os.path.join(save_dir, "training_progress.png"))
-        plt.close()
-
-        # Plot 2: Game Performance Metrics
-        fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 12))
-
-        ax1.plot(episodes, self.success_rates, label="Success Rate", color='purple')
-        ax1.set_title("Success Action Rate")
-        ax1.set_xlabel("Episode")
-        ax1.set_ylabel("Rate")
-        ax1.grid(True)
-        ax1.legend()
-
-        ax2.plot(episodes, self.survival_rates, label="Survival Rate", color='orange')
-        ax2.set_title("Unit Survival Rate")
+        # Plot success rate
+        ax2 = fig.add_subplot(gs[0, 1])
+        if self.success_rates:
+            sns.lineplot(x=range(len(self.success_rates)), y=self.success_rates, ax=ax2)
+        ax2.set_title("Success Rate")
         ax2.set_xlabel("Episode")
         ax2.set_ylabel("Rate")
-        ax2.grid(True)
-        ax2.legend()
+        ax2.set_ylim(0, 1)
 
-        ax3.plot(episodes, self.destruction_ratios, label="Destruction Ratio", color='red')
-        ax3.set_title("Enemy/Own Units Destroyed Ratio")
+        # Plot episode times
+        ax3 = fig.add_subplot(gs[1, 0])
+        if self.episode_times:
+            sns.lineplot(x=range(len(self.episode_times)), y=self.episode_times, ax=ax3)
+        ax3.set_title("Time to Win/Lose")
         ax3.set_xlabel("Episode")
-        ax3.set_ylabel("Ratio")
-        ax3.grid(True)
-        ax3.legend()
+        ax3.set_ylabel("Time (s)")
 
-        ax4.plot(episodes, self.territory_controls, label="Territory Control", color='brown')
-        ax4.set_title("Territory Control")
+        # Plot units created
+        ax4 = fig.add_subplot(gs[1, 1])
+        if self.units_created:
+            sns.lineplot(x=range(len(self.units_created)), y=self.units_created, ax=ax4)
+        ax4.set_title("Units Created")
         ax4.set_xlabel("Episode")
-        ax4.set_ylabel("Control %")
-        ax4.grid(True)
-        ax4.legend()
+        ax4.set_ylabel("Count")
 
+        # Plot survival rate
+        ax5 = fig.add_subplot(gs[2, 0])
+        if self.unit_survival_rates:
+            sns.lineplot(x=range(len(self.unit_survival_rates)), y=self.unit_survival_rates, ax=ax5)
+        ax5.set_title("Unit Survival Rate")
+        ax5.set_xlabel("Episode")
+        ax5.set_ylabel("Rate")
+        ax5.set_ylim(0, 1)
+
+        # Plot kills vs friendly fire
+        ax6 = fig.add_subplot(gs[2, 1])
+        if self.kills_vs_friendly:
+            sns.lineplot(x=range(len(self.kills_vs_friendly)), y=self.kills_vs_friendly, ax=ax6)
+        ax6.set_title("Kills vs Friendly Fire Ratio")
+        ax6.set_xlabel("Episode")
+        ax6.set_ylabel("Ratio")
+
+        # Plot territory control
+        ax7 = fig.add_subplot(gs[3, 0])
+        if self.territory_controls:
+            sns.lineplot(x=range(len(self.territory_controls)), y=self.territory_controls, ax=ax7)
+        ax7.set_title("Territory Control")
+        ax7.set_xlabel("Episode")
+        ax7.set_ylabel("Control %")
+        ax7.set_ylim(0, 1)
+
+        # Plot gold ratio
+        ax8 = fig.add_subplot(gs[3, 1])
+        if self.gold_ratios:
+            sns.lineplot(x=range(len(self.gold_ratios)), y=self.gold_ratios, ax=ax8)
+        ax8.set_title("Gold Ratio")
+        ax8.set_xlabel("Episode")
+        ax8.set_ylabel("Ratio")
+
+        # Plot gold vs opponent
+        ax9 = fig.add_subplot(gs[4, :])
+        if self.gold_vs_opponent:
+            sns.lineplot(x=range(len(self.gold_vs_opponent)), y=self.gold_vs_opponent, ax=ax9)
+        ax9.set_title("Gold vs Opponent")
+        ax9.set_xlabel("Episode")
+        ax9.set_ylabel("Ratio")
+
+        # Adjust layout and save
         plt.tight_layout()
-        plt.savefig(os.path.join(save_dir, "game_metrics.png"))
+        plt.savefig(os.path.join(save_dir, "training_dashboard.png"), dpi=300, bbox_inches='tight')
         plt.close()
-
-        # Plot 3: Resource and Time Metrics
-        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 10))
-
-        ax1.plot(episodes, self.resource_shares, label="Resource Share", color='gold')
-        ax1.set_title("Resource Collection Rate")
-        ax1.set_xlabel("Episode")
-        ax1.set_ylabel("Share")
-        ax1.grid(True)
-        ax1.legend()
-
-        ax2.plot(episodes, self.episode_times, label="Episode Time", color='gray')
-        ax2.set_title("Average Episode Time")
-        ax2.set_xlabel("Episode")
-        ax2.set_ylabel("Time (s)")
-        ax2.grid(True)
-        ax2.legend()
-
-        plt.tight_layout()
-        plt.savefig(os.path.join(save_dir, "resource_time_metrics.png"))
-        plt.close()
-
-        # Plot 4: Algorithm Metrics (Q-Loss)
-        if len(self.q_losses) > 0:
-            plt.figure(figsize=(10, 5))
-            plt.plot(range(1, len(self.q_losses) + 1), self.q_losses, label="Q-Loss", color='cyan')
-            plt.title("Training Loss")
-            plt.xlabel("Episode")
-            plt.ylabel("Loss")
-            plt.grid(True)
-            plt.legend()
-            plt.tight_layout()
-            plt.savefig(os.path.join(save_dir, "q_loss.png"))
-            plt.close()
 
 
 def train(
@@ -323,6 +292,7 @@ def train(
         # Training loop
         print("Starting training loop...")
         timesteps_elapsed = 0
+        episodes_completed = 0
         try:
             # Create progress bar for total training
             pbar = tqdm(
@@ -333,11 +303,15 @@ def train(
                 leave=True,
             )
 
-            while timesteps_elapsed < total_timesteps:
+            while timesteps_elapsed < total_timesteps and episodes_completed < 1000:  # Stop at 1000 episodes
                 # Collect rollout
                 rollout_metrics = agent.collect_rollouts(env)
                 timesteps_elapsed += agent.config.n_steps
+                episodes_completed += len(rollout_metrics.get("episode_rewards", []))
                 pbar.update(agent.config.n_steps)
+
+                # Print episode progress
+                print(f"\nEpisodes completed: {episodes_completed}/1000")
 
                 # Compute advantages and returns
                 with torch.no_grad():
@@ -362,10 +336,9 @@ def train(
 
                 # Update metrics
                 metrics.update(
-                    episode_reward=rollout_metrics["mean_reward"],
-                    episode_length=agent.config.n_steps,
+                    reward=rollout_metrics["mean_reward"],
                     info=rollout_metrics,
-                    q_loss=train_metrics.get("value_loss"),
+                    done=True
                 )
 
                 # Log metrics
@@ -373,9 +346,8 @@ def train(
                     current_metrics = metrics.get_metrics()
                     pbar.set_postfix(
                         {
-                            "reward": f"{current_metrics['reward/mean']:.2f}±{current_metrics['reward/std']:.2f}",
-                            "win_rate": f"{current_metrics['win_rate']:.1%}",
-                            "success_rate": f"{current_metrics['success_rate/mean']:.1%}",
+                            "reward": f"{current_metrics['mean_reward']:.2f}±{current_metrics['std_reward']:.2f}",
+                            "success_rate": f"{current_metrics['success_rate']:.1%}",
                         }
                     )
 
@@ -474,21 +446,27 @@ def evaluate(
 
             # Take step in environment
             obs, reward, done, truncated, info = env.step(action)
-            episode_reward += float(reward)  # Convert to float to avoid type error
+            episode_reward += float(reward)
             episode_length += 1
 
             if render:
                 env.render()
 
-        # Update metrics
-        metrics.update(episode_reward, episode_length, info)
+            # Update metrics if episode is done
+            if done or truncated:
+                metrics.update(
+                    reward=episode_reward,
+                    info=info,
+                    done=True
+                )
+                break
 
         # Update progress bar
         current_metrics = metrics.get_metrics()
         pbar.set_postfix(
             {
-                "reward": f"{current_metrics['reward/mean']:.2f}",
-                "win_rate": f"{current_metrics['win_rate']:.1%}",
+                "reward": f"{current_metrics['mean_reward']:.2f}",
+                "success_rate": f"{current_metrics['success_rate']:.1%}",
             }
         )
 
@@ -498,16 +476,14 @@ def evaluate(
     final_metrics = metrics.get_metrics()
     print("\nFinal Evaluation Metrics:")
     print(
-        f"Mean reward: {final_metrics['reward/mean']:.2f} ± {final_metrics['reward/std']:.2f}"
+        f"Mean reward: {final_metrics['mean_reward']:.2f} ± {final_metrics['std_reward']:.2f}"
     )
-    print(f"Mean episode length: {final_metrics['length/mean']:.1f}")
-    print(f"Win rate: {final_metrics['win_rate']:.2%}")
-    print(f"Mean success rate: {final_metrics['success_rate/mean']:.2%}")
-    print(f"Mean episode time: {final_metrics['episode_time/mean']:.1f}s")
-    print(f"Mean unit survival: {final_metrics['survival_rate/mean']:.2%}")
-    print(f"Mean destruction ratio: {final_metrics['destruction_ratio/mean']:.2f}")
-    print(f"Mean territory control: {final_metrics['territory_control/mean']:.2%}")
-    print(f"Mean resource share: {final_metrics['resource_share/mean']:.2%}")
+    print(f"Mean episode length: {final_metrics['mean_episode_time']:.1f}")
+    print(f"Success rate: {final_metrics['success_rate']:.2%}")
+    print(f"Mean unit survival: {final_metrics['survival_rate']:.2%}")
+    print(f"Mean destruction ratio: {final_metrics['kills_friendly_ratio']:.2f}")
+    print(f"Mean territory control: {final_metrics['territory_control']:.2%}")
+    print(f"Mean resource share: {final_metrics['gold_ratio']:.2%}")
 
     # Generate and save evaluation plots
     plots_dir = os.path.join(os.path.dirname(model_path), "eval_plots")
@@ -515,9 +491,214 @@ def evaluate(
     metrics.plot_metrics(plots_dir)
 
 
+def evaluate_against_multiple_opponents(
+    model_path: str,
+    n_rounds: int = 400,
+    seed: Optional[int] = None,
+    device: str = "cuda",
+) -> None:
+    """Evaluate trained PPO agent against multiple opponents.
+    
+    Args:
+        model_path: Path to the trained model
+        n_rounds: Number of rounds to play against each opponent
+        seed: Random seed for reproducibility
+        device: Device to run evaluation on
+    """
+    print(f"\nEvaluating model from {model_path}")
+    print(f"Playing {n_rounds} rounds against each opponent")
+    
+    # Set random seed
+    if seed is not None:
+        torch.manual_seed(seed)
+        np.random.seed(seed)
+
+    # Initialize all opponents
+    opponents = {
+        "Balanced": BalancedPlayer(),
+        "Adaptive": AdaptivePlayer(),
+        "Archer": ArcherPlayer(),
+        "Worker Rush": WorkerRushPlayer(),
+        "Army": ArmyPlayer(),
+    }
+
+    # Load the trained agent
+    env = StrategyGameEnv(BalancedPlayer())  # Temporary env for initialization
+    state_dim = env.observation_space.shape[0] if env.observation_space.shape else 0
+    action_dim = env.action_space.shape[0] if env.action_space.shape else 0
+    
+    agent = PPOAgent(
+        state_dim=state_dim,
+        action_dim=action_dim,
+        device=device
+    )
+    agent.load(model_path)
+    
+    # Results storage
+    results = []
+    
+    # Evaluate against each opponent
+    for opponent_name, opponent in opponents.items():
+        print(f"\nEvaluating against {opponent_name}...")
+        
+        # Create environment with current opponent
+        env = StrategyGameEnv(opponent)
+        
+        # Initialize metrics tracker for this opponent
+        metrics = MetricsTracker()
+        
+        # Statistics for this opponent
+        ppo_wins = 0
+        ppo_total_reward = 0
+        opponent_wins = 0
+        draws = 0
+        episode_lengths = []
+        win_times = []
+        
+        # Progress bar for rounds
+        pbar = tqdm(range(n_rounds), desc=f"Playing vs {opponent_name}")
+        
+        for episode in pbar:
+            obs, _ = env.reset(seed=seed)
+            done = False
+            truncated = False
+            episode_reward = 0
+            episode_length = 0
+            episode_start_time = time.time()
+            
+            while not (done or truncated):
+                # Get action from policy
+                obs_tensor = torch.FloatTensor(obs).unsqueeze(0).to(agent.device)
+                action, _ = agent.policy.predict(obs_tensor)
+                action = action.cpu().numpy().squeeze()  # Remove batch dimension
+                
+                # Take step in environment
+                obs, reward, done, truncated, info = env.step(action)
+                episode_reward += float(reward)
+                episode_length += 1
+
+                # Update metrics if episode is done
+                if done or truncated:
+                    metrics.update(
+                        reward=episode_reward,
+                        info=info,
+                        done=True
+                    )
+                    break
+            
+            # Record episode statistics
+            episode_lengths.append(episode_length)
+            episode_time = time.time() - episode_start_time
+            
+            if info["our_units"] > info["enemy_units"]:
+                ppo_wins += 1
+                win_times.append(episode_time)
+            elif info["our_units"] < info["enemy_units"]:
+                opponent_wins += 1
+            else:
+                draws += 1
+            
+            ppo_total_reward += episode_reward
+            
+            # Update progress bar
+            win_rate = (ppo_wins / (episode + 1)) * 100
+            pbar.set_postfix({
+                "PPO Wins": f"{win_rate:.1f}%",
+                "Avg Length": f"{np.mean(episode_lengths):.1f}"
+            })
+        
+        # Compute statistics
+        result = {
+            "opponent": opponent_name,
+            "ppo_wins": ppo_wins,
+            "opponent_wins": opponent_wins,
+            "draws": draws,
+            "win_rate": (ppo_wins / n_rounds) * 100,
+            "avg_reward": ppo_total_reward / n_rounds,
+            "avg_episode_length": np.mean(episode_lengths),
+            "avg_win_time": np.mean(win_times) if win_times else float('inf'),
+            "total_episodes": n_rounds
+        }
+        results.append(result)
+        
+        # Print detailed results for this opponent
+        print(f"\nResults vs {opponent_name}:")
+        print(f"PPO Wins: {ppo_wins} ({result['win_rate']:.1f}%)")
+        print(f"Opponent Wins: {opponent_wins} ({(opponent_wins/n_rounds)*100:.1f}%)")
+        print(f"Draws: {draws} ({(draws/n_rounds)*100:.1f}%)")
+        print(f"Average Episode Length: {result['avg_episode_length']:.1f}")
+        print(f"Average Win Time: {result['avg_win_time']:.1f}s")
+        print(f"Average Reward: {result['avg_reward']:.2f}")
+    
+    # Print summary table
+    print("\nOverall Results Summary:")
+    print("-" * 80)
+    print(f"{'Opponent':<15} {'Win Rate':<10} {'Avg Reward':<12} {'Avg Length':<12} {'Avg Win Time':<12}")
+    print("-" * 80)
+    for r in results:
+        print(f"{r['opponent']:<15} {r['win_rate']:>8.1f}% {r['avg_reward']:>10.2f} {r['avg_episode_length']:>10.1f} {r['avg_win_time']:>10.1f}s")
+    print("-" * 80)
+    
+    # Plot results
+    plot_evaluation_results(results, save_dir=os.path.dirname(model_path))
+
+
+def plot_evaluation_results(results: List[Dict], save_dir: str) -> None:
+    """Plot evaluation results.
+    
+    Args:
+        results: List of result dictionaries
+        save_dir: Directory to save plots
+    """
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+    
+    # Set style
+    plt.style.use("seaborn")
+    
+    # Create figure with subplots
+    fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 12))
+    fig.suptitle("PPO Agent Evaluation Results", fontsize=16)
+    
+    # Prepare data
+    opponents = [r["opponent"] for r in results]
+    win_rates = [r["win_rate"] for r in results]
+    avg_rewards = [r["avg_reward"] for r in results]
+    avg_lengths = [r["avg_episode_length"] for r in results]
+    avg_win_times = [r["avg_win_time"] for r in results]
+    
+    # Win Rate plot
+    sns.barplot(x=opponents, y=win_rates, ax=ax1)
+    ax1.set_title("Win Rate by Opponent")
+    ax1.set_ylabel("Win Rate (%)")
+    ax1.tick_params(axis='x', rotation=45)
+    
+    # Average Reward plot
+    sns.barplot(x=opponents, y=avg_rewards, ax=ax2)
+    ax2.set_title("Average Reward by Opponent")
+    ax2.set_ylabel("Average Reward")
+    ax2.tick_params(axis='x', rotation=45)
+    
+    # Average Episode Length plot
+    sns.barplot(x=opponents, y=avg_lengths, ax=ax3)
+    ax3.set_title("Average Episode Length by Opponent")
+    ax3.set_ylabel("Steps")
+    ax3.tick_params(axis='x', rotation=45)
+    
+    # Average Win Time plot
+    sns.barplot(x=opponents, y=avg_win_times, ax=ax4)
+    ax4.set_title("Average Win Time by Opponent")
+    ax4.set_ylabel("Time (s)")
+    ax4.tick_params(axis='x', rotation=45)
+    
+    plt.tight_layout()
+    plt.savefig(os.path.join(save_dir, "evaluation_results.png"), dpi=300, bbox_inches='tight')
+    plt.close()
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mode", type=str, default="train", choices=["train", "eval"])
+    parser.add_argument("--mode", type=str, default="train", choices=["train", "eval", "eval_multi"])
     parser.add_argument("--total-timesteps", type=int, default=1_000_000)
     parser.add_argument("--learning-rate", type=float, default=3e-4)
     parser.add_argument("--n-steps", type=int, default=2048)
@@ -537,6 +718,7 @@ if __name__ == "__main__":
     parser.add_argument("--opponent", type=str, default="balanced")
     parser.add_argument("--model-path", type=str, default=None)
     parser.add_argument("--n-episodes", type=int, default=100)
+    parser.add_argument("--n-rounds", type=int, default=400)
     parser.add_argument("--render", action="store_true")
 
     args = parser.parse_args()
@@ -561,7 +743,7 @@ if __name__ == "__main__":
             save_path=args.save_path,
             opponent=args.opponent,
         )
-    else:
+    elif args.mode == "eval":
         if args.model_path is None:
             raise ValueError("Must specify --model-path for evaluation")
 
@@ -571,4 +753,14 @@ if __name__ == "__main__":
             opponent=args.opponent,
             seed=args.seed,
             render=args.render,
+        )
+    else:  # eval_multi
+        if args.model_path is None:
+            raise ValueError("Must specify --model-path for evaluation")
+            
+        evaluate_against_multiple_opponents(
+            model_path=args.model_path,
+            n_rounds=args.n_rounds,
+            seed=args.seed,
+            device=args.device
         )
